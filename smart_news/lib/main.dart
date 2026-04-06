@@ -1,9 +1,18 @@
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 
+import 'firebase_options.dart';
+import 'screens/login_screen.dart';
+import 'screens/home_screen.dart';
 import 'screens/splash_screen.dart';
+import 'services/auth_service.dart';
 import 'theme/app_theme.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
   runApp(const SmartNewsApp());
 }
 
@@ -16,7 +25,32 @@ class SmartNewsApp extends StatelessWidget {
       title: 'SmartNews',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
-      home: const SplashScreen(),
+      home: const _AuthGate(),
+    );
+  }
+}
+
+class _AuthGate extends StatelessWidget {
+  const _AuthGate();
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<AuthUser?>(
+      stream: AuthService.instance.authStateChanges,
+      builder: (context, snapshot) {
+        // Still checking auth → keep splash
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const SplashScreen();
+        }
+
+        // No user → login
+        if (!snapshot.hasData) {
+          return const LoginScreen();
+        }
+
+        // Logged in → home
+        return const HomeScreen();
+      },
     );
   }
 }
