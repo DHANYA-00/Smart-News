@@ -1,10 +1,16 @@
 import 'package:flutter/material.dart';
 
 import '../models/news_model.dart';
+import '../models/quiz_model.dart';
+import '../services/ai_service.dart';
+import '../services/auth_service.dart';
 import '../services/news_service.dart';
 import '../widgets/category_chips.dart';
 import '../widgets/news_card.dart';
+import 'bookmarks_screen.dart';
 import 'news_detail_screen.dart';
+import 'quiz_screen.dart';
+import 'quiz_history_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -23,11 +29,16 @@ class _HomeScreenState extends State<HomeScreen> {
   ];
 
   final NewsService _newsService = NewsService();
+  final AiService _aiService = AiService();
 
   String _selectedCategory = 'All';
   List<News> _articles = [];
   bool _loading = true;
   String? _errorMessage;
+
+  bool _dailyQuizLoading = false;
+  List<QuizItem>? _todayQuizCache;
+  String? _todayQuizDateKey;
 
   @override
   void initState() {
@@ -38,7 +49,13 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _newsService.dispose();
+    _aiService.dispose();
     super.dispose();
+  }
+
+  String get _todayKey {
+    final now = DateTime.now();
+    return '${now.year}-${now.month}-${now.day}';
   }
 
   Future<void> _loadNews() async {
@@ -72,6 +89,70 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _openDailyQuiz() async {
+    if (_dailyQuizLoading) return;
+
+    if (_articles.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No article available for daily quiz yet.')),
+      );
+      return;
+    }
+
+    final todayKey = _todayKey;
+    if (_todayQuizCache != null && _todayQuizDateKey == todayKey) {
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => QuizScreen(
+            questions: _todayQuizCache!,
+            quizTitle: "Today's Quiz",
+          ),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _dailyQuizLoading = true);
+    try {
+      final article = _articles.first;
+      final quiz = await _aiService.generateQuiz(
+        title: article.title,
+        description: article.detailBody,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _todayQuizCache = quiz;
+        _todayQuizDateKey = todayKey;
+      });
+
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => QuizScreen(
+            questions: quiz,
+            quizTitle: "Today's Quiz",
+          ),
+        ),
+      );
+    } on AiServiceException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message)),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Daily quiz generation failed. Please retry.'),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _dailyQuizLoading = false);
+      }
+    }
+  }
+
   void _onCategorySelected(String category) {
     if (category == _selectedCategory) return;
     setState(() => _selectedCategory = category);
@@ -85,6 +166,35 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('SmartNews'),
+        actions: [
+          IconButton(
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const QuizHistoryScreen(),
+                ),
+              );
+            },
+            icon: const Icon(Icons.history),
+            tooltip: 'Quiz History',
+          ),
+          IconButton(
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const BookmarksScreen(),
+                ),
+              );
+            },
+            icon: const Icon(Icons.bookmark_outline),
+            tooltip: 'Bookmarks',
+          ),
+          IconButton(
+            onPressed: () => AuthService.instance.signOut(),
+            icon: const Icon(Icons.logout_rounded),
+            tooltip: 'Logout',
+          ),
+        ],
       ),
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -96,10 +206,57 @@ class _HomeScreenState extends State<HomeScreen> {
             onSelected: _onCategorySelected,
           ),
           const SizedBox(height: 8),
+          _buildTodayQuizSection(theme),
           Expanded(
             child: _buildBody(theme),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildTodayQuizSection(ThemeData theme) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.auto_awesome, color: theme.colorScheme.primary),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    "Today's Quiz",
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  Text(
+                    'AI-generated current affairs practice in seconds.',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+            TextButton(
+              onPressed: _dailyQuizLoading ? null : _openDailyQuiz,
+              child: _dailyQuizLoading
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Start'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -188,3 +345,4 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 }
+

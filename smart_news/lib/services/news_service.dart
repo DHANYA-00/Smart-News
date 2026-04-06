@@ -14,7 +14,7 @@ class NewsApiException implements Exception {
   String toString() => message;
 }
 
-/// Fetches headlines from [NewsAPI.org](https://newsapi.org).
+/// Fetches headlines from [World News API](https://worldnewsapi.com/).
 class NewsService {
   NewsService({http.Client? httpClient})
       : _client = httpClient ?? http.Client(),
@@ -29,108 +29,109 @@ class NewsService {
     }
   }
 
-  static const _authority = 'newsapi.org';
+  static const _authority = 'api.worldnewsapi.com';
   static const _userAgent = 'SmartNews/1.0 (Flutter; student app)';
 
   /// Maps UI chip labels to API behavior.
   Future<List<News>> fetchForCategory(String categoryLabel) async {
     if (!ApiConfig.hasNewsApiKey) {
       throw NewsApiException(
-        'Missing News API key. Use --dart-define=NEWS_API_KEY=your_key '
+        'Missing WorldNewsAPI key. Use --dart-define=NEWS_API_KEY=your_key '
         'or set kNewsApiKey in lib/config/api_secrets.dart.',
       );
     }
 
     switch (categoryLabel) {
-      case 'Education':
-        return _fetchEverything(query: 'education');
-      case 'Politics':
-        return _fetchEverything(query: 'politics');
       default:
-        return _fetchTopHeadlines(categoryLabel: categoryLabel);
+        return _fetchWorldNews(categoryLabel: categoryLabel);
     }
   }
 
-  /// Top headlines for [All], [Sports], [Tech], or [Business] (if you add it).
-  Future<List<News>> _fetchTopHeadlines({required String categoryLabel}) async {
-    final params = <String, String>{
-      'country': 'us',
-      'pageSize': '30',
-      'apiKey': ApiConfig.newsApiKey,
-    };
-
-    final apiCategory = _topHeadlinesCategoryParam(categoryLabel);
-    if (apiCategory != null) {
-      params['category'] = apiCategory;
+  Future<List<News>> _fetchWorldNews({required String categoryLabel}) async {
+    // WorldNewsAPI doesn't have the same category endpoints as NewsAPI.org.
+    // We'll use Top News for "All" and Search News for other chips.
+    if (categoryLabel == 'All') {
+      final uri = Uri.https(_authority, '/top-news', {
+        'api-key': ApiConfig.newsApiKey,
+        'source-country': 'us',
+        'language': 'en',
+      });
+      return _getTopNews(uri);
     }
 
-    final uri = Uri.https(_authority, '/v2/top-headlines', params);
-    return _getArticles(uri);
-  }
-
-  /// NewsAPI top-headlines supports: business, entertainment, general, health,
-  /// science, sports, technology. [All] omits category.
-  String? _topHeadlinesCategoryParam(String label) {
-    switch (label) {
-      case 'Sports':
-        return 'sports';
-      case 'Tech':
-        return 'technology';
-      case 'Business':
-        return 'business';
-      default:
-        return null;
-    }
-  }
-
-  Future<List<News>> _fetchEverything({required String query}) async {
-    final uri = Uri.https(_authority, '/v2/everything', {
-      'q': query,
+    final query = categoryLabel.toLowerCase();
+    final uri = Uri.https(_authority, '/search-news', {
+      'api-key': ApiConfig.newsApiKey,
+      'text': query,
       'language': 'en',
-      'sortBy': 'publishedAt',
-      'pageSize': '30',
-      'apiKey': ApiConfig.newsApiKey,
+      'source-countries': 'us',
+      'number': '30',
+      'offset': '0',
     });
-    return _getArticles(uri);
+    return _getSearchNews(uri);
   }
 
-  Future<List<News>> _getArticles(Uri uri) async {
-    final response = await _client.get(
-      uri,
-      headers: {'User-Agent': _userAgent},
-    );
-
+  Future<List<News>> _getTopNews(Uri uri) async {
+    final response = await _client.get(uri, headers: {'User-Agent': _userAgent});
     if (response.statusCode != 200) {
-      throw NewsApiException(
-        'Request failed (${response.statusCode}). Please try again later.',
-      );
+      throw NewsApiException(_worldError(response));
     }
 
-    Map<String, dynamic> body;
-    try {
-      body = jsonDecode(response.body) as Map<String, dynamic>;
-    } on FormatException {
-      throw NewsApiException('Invalid response from news service.');
+    final body = _decodeJson(response.body);
+    final top = body['top_news'] as List<dynamic>? ?? [];
+    final out = <News>[];
+    for (final cluster in top) {
+      if (cluster is! Map<String, dynamic>) continue;
+      final news = cluster['news'] as List<dynamic>? ?? [];
+      for (final item in news) {
+        if (item is! Map<String, dynamic>) continue;
+        final article = News.fromJson(item);
+        if (article.title.isEmpty) continue;
+        out.add(article);
+      }
+    }
+    return out;
+  }
+
+  Future<List<News>> _getSearchNews(Uri uri) async {
+    final response = await _client.get(uri, headers: {'User-Agent': _userAgent});
+    if (response.statusCode != 200) {
+      throw NewsApiException(_worldError(response));
     }
 
-    if (body['status'] != 'ok') {
-      final msg = body['message'] as String? ?? 'News service error';
-      throw NewsApiException(msg);
-    }
-
-    final raw = body['articles'] as List<dynamic>? ?? [];
-    final list = <News>[];
+    final body = _decodeJson(response.body);
+    final raw = body['news'] as List<dynamic>? ?? [];
+    final out = <News>[];
     for (final item in raw) {
       if (item is! Map<String, dynamic>) continue;
       final article = News.fromJson(item);
-      if (_isPlaceholderArticle(article.title)) continue;
-      list.add(article);
+      if (article.title.isEmpty) continue;
+      out.add(article);
     }
-    return list;
+    return out;
   }
 
-  bool _isPlaceholderArticle(String title) {
-    final t = title.toLowerCase();
-    return t.contains('[removed]');
+  Map<String, dynamic> _decodeJson(String text) {
+    try {
+      return jsonDecode(text) as Map<String, dynamic>;
+    } on FormatException {
+      throw NewsApiException('Invalid response from WorldNewsAPI.');
+    }
   }
+
+  String _worldError(http.Response response) {
+    final code = response.statusCode;
+    try {
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      final msg = body['message'] as String?;
+      if (msg != null && msg.isNotEmpty) {
+        return 'WorldNewsAPI error ($code): $msg';
+      }
+    } catch (_) {
+      // ignore
+    }
+    return 'WorldNewsAPI request failed ($code).';
+  }
+
+  // No placeholder filter needed for WorldNewsAPI.
 }
