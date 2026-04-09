@@ -46,3 +46,4 @@ app.*.map.json
 
 # Local News API key (use api_secrets.example.dart as template)
 lib/config/api_secrets.dart
+.env

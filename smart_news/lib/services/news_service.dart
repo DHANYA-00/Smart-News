@@ -1,8 +1,8 @@
 import 'dart:convert';
 
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 
-import '../config/api_config.dart';
 import '../models/news_model.dart';
 
 class NewsApiException implements Exception {
@@ -14,7 +14,8 @@ class NewsApiException implements Exception {
   String toString() => message;
 }
 
-/// Fetches headlines from [World News API](https://worldnewsapi.com/).
+/// Fetches news from [NewsAPI.org](https://newsapi.org/).
+/// Free tier: 100 requests/day with category support.
 class NewsService {
   NewsService({http.Client? httpClient})
       : _client = httpClient ?? http.Client(),
@@ -29,109 +30,161 @@ class NewsService {
     }
   }
 
-  static const _authority = 'api.worldnewsapi.com';
+  static const _authority = 'newsapi.org';
   static const _userAgent = 'SmartNews/1.0 (Flutter; student app)';
+
+  // Category mapping for NewsAPI
+  static const Map<String, String> _categoryMap = {
+    'General': 'general',
+    'Sports': 'sports',
+    'Politics': 'general', // NewsAPI doesn't have politics, use general
+    'Technology': 'technology',
+    'Business': 'business',
+    'Science': 'science',
+    'Health': 'health',
+    'Entertainment': 'entertainment',
+  };
+
+  String get _apiKey => dotenv.env['NEWSAPI_API_KEY'] ?? '';
+
+  bool get hasApiKey => _apiKey.isNotEmpty;
 
   /// Maps UI chip labels to API behavior.
   Future<List<News>> fetchForCategory(String categoryLabel) async {
-    if (!ApiConfig.hasNewsApiKey) {
+    if (!hasApiKey) {
       throw NewsApiException(
-        'Missing WorldNewsAPI key. Use --dart-define=NEWS_API_KEY=your_key '
-        'or set kNewsApiKey in lib/config/api_secrets.dart.',
+        'Missing NewsAPI key. Add NEWSAPI_API_KEY to .env file. '
+        'Get free key at https://newsapi.org/',
       );
     }
 
     switch (categoryLabel) {
+      case 'Tamil Nadu':
+        return _fetchTamilNaduNews();
       default:
-        return _fetchWorldNews(categoryLabel: categoryLabel);
+        return _fetchCategoryNews(categoryLabel);
     }
   }
 
-  Future<List<News>> _fetchWorldNews({required String categoryLabel}) async {
-    // WorldNewsAPI doesn't have the same category endpoints as NewsAPI.org.
-    // We'll use Top News for "All" and Search News for other chips.
-    if (categoryLabel == 'All') {
-      final uri = Uri.https(_authority, '/top-news', {
-        'api-key': ApiConfig.newsApiKey,
-        'source-country': 'us',
-        'language': 'en',
-      });
-      return _getTopNews(uri);
-    }
-
-    final query = categoryLabel.toLowerCase();
-    final uri = Uri.https(_authority, '/search-news', {
-      'api-key': ApiConfig.newsApiKey,
-      'text': query,
+  /// Fetch Tamil Nadu-specific top headlines (using India as base)
+  Future<List<News>> _fetchTamilNaduNews() async {
+    final queryParams = {
+      'apiKey': _apiKey,
+      'country': 'in',
+      'pageSize': '50',
       'language': 'en',
-      'source-countries': 'us',
-      'number': '30',
-      'offset': '0',
-    });
-    return _getSearchNews(uri);
+    };
+
+    final uri =
+        Uri.https(_authority, '/v2/top-headlines', queryParams);
+    return _fetchNews(uri, 'Tamil Nadu');
   }
 
-  Future<List<News>> _getTopNews(Uri uri) async {
-    final response = await _client.get(uri, headers: {'User-Agent': _userAgent});
-    if (response.statusCode != 200) {
-      throw NewsApiException(_worldError(response));
+  /// Fetch news by category
+  Future<List<News>> _fetchCategoryNews(String categoryLabel) async {
+    final category = _categoryMap[categoryLabel] ?? 'general';
+
+    final queryParams = {
+      'apiKey': _apiKey,
+      'category': category,
+      'pageSize': '50',
+      'language': 'en',
+    };
+    
+    if (categoryLabel == 'Politics') {
+      queryParams['q'] = 'politics';
     }
 
-    final body = _decodeJson(response.body);
-    final top = body['top_news'] as List<dynamic>? ?? [];
-    final out = <News>[];
-    for (final cluster in top) {
-      if (cluster is! Map<String, dynamic>) continue;
-      final news = cluster['news'] as List<dynamic>? ?? [];
-      for (final item in news) {
-        if (item is! Map<String, dynamic>) continue;
-        final article = News.fromJson(item);
-        if (article.title.isEmpty) continue;
-        out.add(article);
+    final uri =
+        Uri.https(_authority, '/v2/top-headlines', queryParams);
+    return _fetchNews(uri, categoryLabel);
+  }
+
+  Future<List<News>> _fetchNews(Uri uri, String category) async {
+    try {
+      final response = await _client
+          .get(uri, headers: {'User-Agent': _userAgent})
+          .timeout(
+            const Duration(seconds: 15),
+            onTimeout: () => throw NewsApiException('Request timeout'),
+          );
+
+      if (response.statusCode != 200) {
+        throw NewsApiException(_formatError(response));
       }
-    }
-    return out;
-  }
 
-  Future<List<News>> _getSearchNews(Uri uri) async {
-    final response = await _client.get(uri, headers: {'User-Agent': _userAgent});
-    if (response.statusCode != 200) {
-      throw NewsApiException(_worldError(response));
-    }
+      final body = _decodeJson(response.body);
 
-    final body = _decodeJson(response.body);
-    final raw = body['news'] as List<dynamic>? ?? [];
-    final out = <News>[];
-    for (final item in raw) {
-      if (item is! Map<String, dynamic>) continue;
-      final article = News.fromJson(item);
-      if (article.title.isEmpty) continue;
-      out.add(article);
+      // Parse articles
+      final articles = body['articles'] as List<dynamic>? ?? [];
+      final news = <News>[];
+
+      for (final item in articles) {
+        if (item is! Map<String, dynamic>) continue;
+
+        try {
+          // Add category to the item so News.fromJson can use it
+          item['category'] = category;
+          
+          final article = News.fromJson(item);
+          // Only add if we have essential fields
+          if (article.title.isNotEmpty && article.url.isNotEmpty) {
+            news.add(article);
+          }
+        } catch (_) {
+          // Skip malformed articles
+          continue;
+        }
+      }
+
+      if (news.isEmpty) {
+        throw NewsApiException('No articles available for this category');
+      }
+
+      return news;
+    } on NewsApiException {
+      rethrow;
+    } catch (e) {
+      throw NewsApiException('Error fetching news: $e');
     }
-    return out;
   }
 
   Map<String, dynamic> _decodeJson(String text) {
     try {
       return jsonDecode(text) as Map<String, dynamic>;
     } on FormatException {
-      throw NewsApiException('Invalid response from WorldNewsAPI.');
+      throw NewsApiException('Invalid JSON response from GNews API');
     }
   }
 
-  String _worldError(http.Response response) {
+  String _formatError(http.Response response) {
     final code = response.statusCode;
+
+    // Try to parse error message from response
     try {
       final body = jsonDecode(response.body) as Map<String, dynamic>;
-      final msg = body['message'] as String?;
-      if (msg != null && msg.isNotEmpty) {
-        return 'WorldNewsAPI error ($code): $msg';
+      final message = body['message'] as String?;
+      if (message != null && message.isNotEmpty) {
+        return 'NewsAPI error ($code): $message';
       }
     } catch (_) {
       // ignore
     }
-    return 'WorldNewsAPI request failed ($code).';
-  }
 
-  // No placeholder filter needed for WorldNewsAPI.
+    // Standard HTTP error messages
+    switch (code) {
+      case 400:
+        return 'NewsAPI error: Bad request - check parameters';
+      case 401:
+        return 'NewsAPI error: Invalid API key. Get one at https://newsapi.org/';
+      case 403:
+        return 'NewsAPI error: Access forbidden';
+      case 429:
+        return 'NewsAPI error: Rate limit exceeded (100/day free tier) - try again tomorrow';
+      case 500:
+        return 'NewsAPI error: Server error - try again later';
+      default:
+        return 'NewsAPI request failed ($code)';
+    }
+  }
 }

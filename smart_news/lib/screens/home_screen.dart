@@ -1,16 +1,13 @@
+import 'dart:math';
 import 'package:flutter/material.dart';
 
 import '../models/news_model.dart';
-import '../models/quiz_model.dart';
-import '../services/ai_service.dart';
-import '../services/auth_service.dart';
+import '../services/bookmarks_service.dart';
 import '../services/news_service.dart';
 import '../widgets/category_chips.dart';
 import '../widgets/news_card.dart';
 import 'bookmarks_screen.dart';
 import 'news_detail_screen.dart';
-import 'quiz_screen.dart';
-import 'quiz_history_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -29,36 +26,42 @@ class _HomeScreenState extends State<HomeScreen> {
   ];
 
   final NewsService _newsService = NewsService();
-  final AiService _aiService = AiService();
+  final BookmarksService _bookmarksService = BookmarksService.instance;
 
   String _selectedCategory = 'All';
   List<News> _articles = [];
   bool _loading = true;
   String? _errorMessage;
-
-  bool _dailyQuizLoading = false;
-  List<QuizItem>? _todayQuizCache;
-  String? _todayQuizDateKey;
+  Set<String> _bookmarkedIds = {};
 
   @override
   void initState() {
     super.initState();
+    _initializeBookmarks();
     _loadNews();
+  }
+
+  Future<void> _initializeBookmarks() async {
+    await _bookmarksService.init();
+    if (mounted) await _refreshBookmarks();
+  }
+
+  Future<void> _refreshBookmarks() async {
+    final bookmarks = await _bookmarksService.getBookmarks();
+    if (mounted) {
+      setState(() {
+        _bookmarkedIds = bookmarks.map((a) => a.id).toSet();
+      });
+    }
   }
 
   @override
   void dispose() {
     _newsService.dispose();
-    _aiService.dispose();
     super.dispose();
   }
 
-  String get _todayKey {
-    final now = DateTime.now();
-    return '${now.year}-${now.month}-${now.day}';
-  }
-
-  Future<void> _loadNews() async {
+  Future<void> _loadNews({bool shuffle = false}) async {
     setState(() {
       _loading = true;
       _errorMessage = null;
@@ -67,8 +70,12 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final list = await _newsService.fetchForCategory(_selectedCategory);
       if (!mounted) return;
+
+      // Shuffle when user pulls to refresh so different articles show first
+      final displayed = shuffle ? (list..shuffle(Random())) : list;
+
       setState(() {
-        _articles = list;
+        _articles = displayed;
         _loading = false;
       });
     } on NewsApiException catch (e) {
@@ -89,74 +96,23 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _openDailyQuiz() async {
-    if (_dailyQuizLoading) return;
-
-    if (_articles.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No article available for daily quiz yet.')),
-      );
-      return;
-    }
-
-    final todayKey = _todayKey;
-    if (_todayQuizCache != null && _todayQuizDateKey == todayKey) {
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => QuizScreen(
-            questions: _todayQuizCache!,
-            quizTitle: "Today's Quiz",
-          ),
-        ),
-      );
-      return;
-    }
-
-    setState(() => _dailyQuizLoading = true);
-    try {
-      final article = _articles.first;
-      final quiz = await _aiService.generateQuiz(
-        title: article.title,
-        description: article.detailBody,
-      );
-
-      if (!mounted) return;
-      setState(() {
-        _todayQuizCache = quiz;
-        _todayQuizDateKey = todayKey;
-      });
-
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => QuizScreen(
-            questions: quiz,
-            quizTitle: "Today's Quiz",
-          ),
-        ),
-      );
-    } on AiServiceException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.message)),
-      );
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Daily quiz generation failed. Please retry.'),
-        ),
-      );
-    } finally {
-      if (mounted) {
-        setState(() => _dailyQuizLoading = false);
-      }
-    }
-  }
-
   void _onCategorySelected(String category) {
     if (category == _selectedCategory) return;
     setState(() => _selectedCategory = category);
     _loadNews();
+  }
+
+  Future<void> _toggleBookmark(News article) async {
+    final wasAdded = await _bookmarksService.toggleBookmark(article);
+    await _refreshBookmarks();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(wasAdded ? 'Bookmarked!' : 'Removed from bookmarks'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   @override
@@ -171,28 +127,12 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute<void>(
-                  builder: (_) => const QuizHistoryScreen(),
-                ),
-              );
-            },
-            icon: const Icon(Icons.history),
-            tooltip: 'Quiz History',
-          ),
-          IconButton(
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute<void>(
                   builder: (_) => const BookmarksScreen(),
                 ),
               );
             },
-            icon: const Icon(Icons.bookmark_outline),
+            icon: const Icon(Icons.bookmark_outline_rounded),
             tooltip: 'Bookmarks',
-          ),
-          IconButton(
-            onPressed: () => AuthService.instance.signOut(),
-            icon: const Icon(Icons.logout_rounded),
-            tooltip: 'Logout',
           ),
         ],
       ),
@@ -205,67 +145,16 @@ class _HomeScreenState extends State<HomeScreen> {
             selected: _selectedCategory,
             onSelected: _onCategorySelected,
           ),
-          const SizedBox(height: 8),
-          _buildTodayQuizSection(theme),
-          Expanded(
-            child: _buildBody(theme),
-          ),
+          const SizedBox(height: 4),
+          Expanded(child: _buildBody(theme)),
         ],
-      ),
-    );
-  }
-
-  Widget _buildTodayQuizSection(ThemeData theme) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: theme.colorScheme.surfaceContainerLow,
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Row(
-          children: [
-            Icon(Icons.auto_awesome, color: theme.colorScheme.primary),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    "Today's Quiz",
-                    style: theme.textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  Text(
-                    'AI-generated current affairs practice in seconds.',
-                    style: theme.textTheme.bodySmall,
-                  ),
-                ],
-              ),
-            ),
-            TextButton(
-              onPressed: _dailyQuizLoading ? null : _openDailyQuiz,
-              child: _dailyQuizLoading
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Text('Start'),
-            ),
-          ],
-        ),
       ),
     );
   }
 
   Widget _buildBody(ThemeData theme) {
     if (_loading) {
-      return const Center(
-        child: CircularProgressIndicator(),
-      );
+      return const Center(child: CircularProgressIndicator());
     }
 
     if (_errorMessage != null) {
@@ -275,17 +164,12 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(
-                Icons.wifi_off_rounded,
-                size: 56,
-                color: theme.colorScheme.outline,
-              ),
+              Icon(Icons.wifi_off_rounded,
+                  size: 56, color: theme.colorScheme.outline),
               const SizedBox(height: 16),
-              Text(
-                _errorMessage!,
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodyLarge,
-              ),
+              Text(_errorMessage!,
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyLarge),
               const SizedBox(height: 20),
               FilledButton.icon(
                 onPressed: _loadNews,
@@ -300,21 +184,18 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (_articles.isEmpty) {
       return RefreshIndicator(
-        onRefresh: _loadNews,
+        onRefresh: () => _loadNews(shuffle: true),
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
           children: [
-            SizedBox(
-              height: MediaQuery.sizeOf(context).height * 0.35,
-            ),
+            SizedBox(height: MediaQuery.sizeOf(context).height * 0.35),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 32),
               child: Text(
                 'No stories in this category right now. Pull down to refresh.',
                 textAlign: TextAlign.center,
-                style: theme.textTheme.bodyLarge?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
+                style: theme.textTheme.bodyLarge
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
               ),
             ),
           ],
@@ -323,7 +204,8 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     return RefreshIndicator(
-      onRefresh: _loadNews,
+      // shuffle=true so pull-to-refresh shows fresh order
+      onRefresh: () => _loadNews(shuffle: true),
       child: ListView.builder(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.only(top: 4, bottom: 16),
@@ -332,6 +214,7 @@ class _HomeScreenState extends State<HomeScreen> {
           final news = _articles[index];
           return NewsCard(
             news: news,
+            isBookmarked: _bookmarkedIds.contains(news.id),
             onTap: () {
               Navigator.of(context).push(
                 MaterialPageRoute<void>(
@@ -339,10 +222,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               );
             },
+            onBookmarkToggle: () => _toggleBookmark(news),
           );
         },
       ),
     );
   }
 }
-
